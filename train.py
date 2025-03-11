@@ -15,7 +15,8 @@ from classes import *
 
 DEBUG = True
 REWARD_DEBUG = False
-POSITIONAL_DEBUG = False
+POSITIONAL_DEBUG = True
+TARGET_RANDOM = False
 
 class PPOEnv(gym.Env):
     """
@@ -47,7 +48,7 @@ class PPOEnv(gym.Env):
 
         # Step Tracking
         self.current_step = 0
-        self.max_steps = 500 # Total Episode Length which translates via (max_steps * dt) seconds
+        self.max_steps = 190 # Total Episode Length which translates via (max_steps * dt) seconds
 
     def reset(self, seed=None, **kwargs):
         super().reset(seed=seed)
@@ -55,15 +56,23 @@ class PPOEnv(gym.Env):
         # Reset step counts
         self.current_step = 0
         
-        # Randomize the robot's starting position and orientation within the field.
-        self.simulation.robot.x = np.random.uniform(0, FIELD_SIZE_INCHES)
-        self.simulation.robot.y = np.random.uniform(0, FIELD_SIZE_INCHES)
-        self.simulation.robot.theta = np.random.uniform(-math.pi, math.pi)
+        # Randomize the robot's starting position and orientation within the field. (DISABLED CURRENTLY)
+        #self.simulation.robot.x = np.random.uniform(0, FIELD_SIZE_INCHES)
+        #self.simulation.robot.y = np.random.uniform(0, FIELD_SIZE_INCHES)
+        #self.simulation.robot.theta = np.random.uniform(-math.pi, math.pi)
         
-        # Randomize target position and orientation within the field.
-        target_x = np.random.uniform(0, FIELD_SIZE_INCHES)
-        target_y = np.random.uniform(0, FIELD_SIZE_INCHES)
-        target_theta = np.random.uniform(-math.pi, math.pi)
+        if TARGET_RANDOM:
+            # Randomize target position and orientation within the field.
+            target_x = np.random.uniform(0, FIELD_SIZE_INCHES)
+            target_y = np.random.uniform(0, FIELD_SIZE_INCHES)
+            target_theta = np.random.uniform(-math.pi, math.pi)
+        
+        else:
+            # Randomize target position and orientation within the field.
+            target_x = FIELD_SIZE_INCHES - 20
+            target_y = FIELD_SIZE_INCHES - 20
+            target_theta = math.pi
+
         self.target = np.array([target_x, target_y, target_theta], dtype=np.float32)
         
         # Get initial state from simulation using zero power inputs.
@@ -95,19 +104,47 @@ class PPOEnv(gym.Env):
         
         return obs, reward, done, truncated, {}
 
-    def _calculate_reward(self, obs, action):
-        # Placeholder: for instance, negative Euclidean distance to target.
-        robot_x, robot_y = obs[0], obs[1]
-        target_x, target_y = self.target[0], self.target[1]
-        distance = np.linalg.norm(np.array([robot_x, robot_y]) - np.array([target_x, target_y]))
-        reward = -distance
+    def _angle_difference(self, angle1, angle2):
+        """
+        Computes the minimal difference between two angles (in radians).
+        """
+        diff = angle1 - angle2
+        return (diff + np.pi) % (2 * np.pi) - np.pi
 
+    def _calculate_reward(self, obs, action):
+        # Extract robot's current position and heading from observation
+        robot_x, robot_y, robot_theta = obs[0], obs[1], obs[2]
+        # Extract target position (ignore target theta for now)
+        target_x, target_y = self.target[0], self.target[1]
+        
+        # Compute Euclidean distance to target
+        distance = np.linalg.norm(np.array([robot_x, robot_y]) - np.array([target_x, target_y]))
+        
+        # Compute desired heading: angle from robot to target
+        desired_heading = np.arctan2(target_y - robot_y, target_x - robot_x)
+        # Compute heading error (minimal angle difference)
+        heading_error = abs(self._angle_difference(desired_heading, robot_theta))
+        
+        # Base reward: negative distance and penalty for misalignment.
+        # You can tune the weight for the heading error penalty (here, 0.5)
+        reward = -distance - 0.5 * heading_error
+        
+        # Bonus for being very close to the target (threshold of 5 inches)
+        if distance < 5.0:
+            reward += 100.0
+        
+        # Optional: penalize high magnitude actions to encourage smoother control.
+        action_penalty = 0.001 * np.sum(np.square(action))
+        reward -= action_penalty
+        
         if REWARD_DEBUG:
-            print(f"Reward is {reward}")
+            print(f"[Reward Debug] Distance: {distance:.2f}, Heading Error: {heading_error:.2f}, "
+                  f"Action Penalty: {action_penalty:.4f}, Reward: {reward:.2f}")
         
         if POSITIONAL_DEBUG:
-            print(f"Robot Position: {robot_x, robot_y}, Target Position: {target_x,target_y}, Distance to Target: {distance}")
-
+            with open("positional_debug.log", "a") as f:
+                f.write(f"Robot: ({robot_x:.2f}, {robot_y:.2f}), Target: ({target_x:.2f}, {target_y:.2f}), Distance: {distance:.2f}\n")
+                # tail -f positional_debug.log
         return reward
 
 
@@ -137,12 +174,12 @@ if __name__ == "__main__":
         policy_kwargs=policy_kwargs,
         env=vec_env,
         verbose=1,
-        normalize_advantage = False,
+        normalize_advantage = True,
         use_sde = False, # Essentially reducing delta of actions when rewards are very positive (breaks it while initially learning)
         #sde_sample_freq = 3,
         learning_rate=linear_schedule(initial_value= 0.0003),
-        n_steps=19*10, # Steps per learning update
-        batch_size=190,
+        n_steps=95, # Steps per learning update
+        batch_size=19,
         gamma=0.85,
         gae_lambda= 0.8,
         vf_coef = 0.85, # Lower reliance on v(s) to compute advantage which is then used to compute Loss -> Gradient
@@ -151,7 +188,7 @@ if __name__ == "__main__":
         #tensorboard_log="./Patrol&Proetect_PPO/ppo_patrol_tensorboard/"
     )
 
-    model.learn(total_timesteps=90_000)
+    model.learn(total_timesteps=190_000)
 
     # Save the model
     model.save("./PPO_V2/Trained_Model")
